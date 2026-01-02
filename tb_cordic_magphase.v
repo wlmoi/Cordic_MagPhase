@@ -47,7 +47,7 @@ module tb_cordic_magphase;
         begin
             phase_deg = (phase * 1.0) * 180.0 / 3.141592653589793 / (2.0**28);
             magnitude_real = magnitude / (2.0**OUTPUT_FRAC_BITS);
-            $display("Time %0t ns | x=%0d y=%0d | magnitude=%0f | phase_deg=%0f", $time, x_in, y_in, magnitude_real, phase_deg);
+            $display("Time %0t ns | x=%0d y=%0d | magnitude_raw=%0d | magnitude=%0f | phase_deg=%0f", $time, x_in, y_in, magnitude, magnitude_real, phase_deg);
         end
     endtask
 

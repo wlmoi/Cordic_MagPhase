@@ -13,7 +13,11 @@ module cordic_magphase #(
     parameter integer INT_WIDTH        = 32,
     parameter integer ITERATIONS       = 32,
     parameter integer GAIN_FRAC_BITS   = 28,
-    parameter integer OUTPUT_FRAC_BITS = 14
+    parameter integer OUTPUT_FRAC_BITS = 14,
+    // Pipeline depth for magnitude output (shift-register). Set to 1 for no extra latency.
+    parameter integer MAG_PIPELINE     = 2,
+    // Input pipeline depth (number of register stages before CORDIC starts)
+    parameter integer INPUT_PIPELINE   = 1
 ) (
     input  wire                          clk,
     input  wire                          rst_n,
@@ -26,13 +30,14 @@ module cordic_magphase #(
     output reg  signed [INT_WIDTH-1:0]   phase
 );
 
-    // FSM states
-    localparam IDLE         = 2'd0;
-    localparam ITERATE      = 2'd1;
-    localparam POST_PROCESS = 2'd2;
-    localparam DONE_STATE   = 2'd3;
+    // FSM states (expanded to 3 bits to add LOAD_INPUT)
+    localparam IDLE         = 3'd0;
+    localparam LOAD_INPUT   = 3'd1;
+    localparam ITERATE      = 3'd2;
+    localparam POST_PROCESS = 3'd3;
+    localparam DONE_STATE   = 3'd4;
 
-    reg [1:0] state, state_next;
+    reg [2:0] state, state_next;
 
     // Datapath registers
     reg signed [INT_WIDTH-1:0] x_reg, y_reg, x_next, y_next;
@@ -93,6 +98,16 @@ module cordic_magphase #(
     wire signed [47:0] mag_prod = x_reg * K_INV; // Q(INT+GAIN_FRAC_BITS)
     wire signed [INT_WIDTH-1:0] mag_corr = mag_prod >>> GAIN_FRAC_BITS;
     reg  signed [INT_WIDTH-1:0] phase_tmp;
+    // Pipeline storage for magnitude and phase outputs
+    integer i;
+    reg signed [INT_WIDTH-1:0] mag_pipe [0:MAG_PIPELINE-1];
+    reg signed [INT_WIDTH-1:0] phase_pipe [0:MAG_PIPELINE-1];
+    reg [MAG_PIPELINE-1:0] mag_valid_sr;
+    // Input pipeline registers
+    reg signed [INT_WIDTH-1:0] in_pipe_x [0:INPUT_PIPELINE-1];
+    reg signed [INT_WIDTH-1:0] in_pipe_y [0:INPUT_PIPELINE-1];
+    reg [INPUT_PIPELINE-1:0] in_valid_sr;
+    reg [INPUT_PIPELINE-1:0] in_valid_next;
 
     // Sequential
     always @(posedge clk or negedge rst_n) begin
@@ -107,6 +122,16 @@ module cordic_magphase #(
             magnitude <= 0;
             phase     <= 0;
             pi_correction <= 2'sd0;
+            mag_valid_sr <= {MAG_PIPELINE{1'b0}};
+            in_valid_sr <= {INPUT_PIPELINE{1'b0}};
+            for (i = 0; i < MAG_PIPELINE; i = i + 1) begin
+                mag_pipe[i] <= 0;
+                phase_pipe[i] <= 0;
+            end
+            for (i = 0; i < INPUT_PIPELINE; i = i + 1) begin
+                in_pipe_x[i] <= 0;
+                in_pipe_y[i] <= 0;
+            end
         end else begin
             state    <= state_next;
             x_reg    <= x_next;
@@ -114,11 +139,24 @@ module cordic_magphase #(
             z_reg    <= z_next;
             iter_cnt <= iter_cnt_next;
             pi_correction <= pi_correction_next;
-            busy     <= (state_next != IDLE) && (state_next != DONE_STATE);
-            done     <= (state_next == DONE_STATE);
+            // Input pipeline shifting: capture on start when in IDLE, otherwise shift
+            // compute next in_valid shift-register safely for any INPUT_PIPELINE
+            in_valid_next[0] = (state == IDLE && start) ? 1'b1 : 1'b0;
+            for (i = 1; i < INPUT_PIPELINE; i = i + 1)
+                in_valid_next[i] = in_valid_sr[i-1];
+            in_valid_sr <= in_valid_next;
+
+            in_pipe_x[0] <= (state == IDLE && start) ? {{(INT_WIDTH-INPUT_WIDTH){x_in[INPUT_WIDTH-1]}}, x_in} : 0;
+            in_pipe_y[0] <= (state == IDLE && start) ? {{(INT_WIDTH-INPUT_WIDTH){y_in[INPUT_WIDTH-1]}}, y_in} : 0;
+            for (i = 1; i < INPUT_PIPELINE; i = i + 1) begin
+                in_pipe_x[i] <= in_pipe_x[i-1];
+                in_pipe_y[i] <= in_pipe_y[i-1];
+            end
+            // Push scaled results into pipeline when final result ready
             if (state_next == DONE_STATE) begin
                 // Scale magnitude to OUTPUT_FRAC_BITS (shift left to add fractional bits)
-                magnitude <= ((mag_corr < 0) ? -mag_corr : mag_corr) << OUTPUT_FRAC_BITS;
+                // Load directly into pipeline first stage to avoid extra cycle of delay
+                mag_pipe[0] <= ((mag_corr < 0) ? -mag_corr : mag_corr) << OUTPUT_FRAC_BITS;
                 case (pi_correction)
                     -2'sd1: phase_tmp = z_next - PI_CONST;
                     2'sd0:  phase_tmp = z_next;
@@ -128,8 +166,29 @@ module cordic_magphase #(
                     phase_tmp = phase_tmp - TWOPI_CONST;
                 else if (phase_tmp < -PI_CONST)
                     phase_tmp = phase_tmp + TWOPI_CONST;
-                phase <= phase_tmp;
+                // (phase_pipe[0] already assigned below)
+                phase_pipe[0] <= phase_tmp;
+                mag_valid_sr <= {mag_valid_sr[MAG_PIPELINE-2:0], 1'b1};
+            end else begin
+                // no new result this cycle
+                mag_pipe[0] <= 0;
+                phase_pipe[0] <= 0;
+                mag_valid_sr <= {mag_valid_sr[MAG_PIPELINE-2:0], 1'b0};
             end
+
+            // Shift remaining pipeline stages
+            for (i = 1; i < MAG_PIPELINE; i = i + 1) begin
+                mag_pipe[i] <= mag_pipe[i-1];
+                phase_pipe[i] <= phase_pipe[i-1];
+            end
+
+            // Output from last stage
+            magnitude <= mag_pipe[MAG_PIPELINE-1];
+            phase <= phase_pipe[MAG_PIPELINE-1];
+
+            // busy when processing or pipeline not empty; done when last stage valid
+            busy <= (state_next != IDLE) || (|mag_valid_sr != 0);
+            done <= mag_valid_sr[MAG_PIPELINE-1];
         end
     end
 
@@ -146,22 +205,31 @@ module cordic_magphase #(
         case (state)
             IDLE: begin
                 if (start) begin
-                    // Sign-extend inputs
-                    x_next = {{(INT_WIDTH-INPUT_WIDTH){x_in[INPUT_WIDTH-1]}}, x_in};
-                    y_next = {{(INT_WIDTH-INPUT_WIDTH){y_in[INPUT_WIDTH-1]}}, y_in};
-                    // If x is negative, rotate vector by 180 deg to bring into right half-plane
-                    if (x_next < 0) begin
-                        x_next = -x_next;
-                        y_next = -y_next;
-                        pi_correction_next = (y_next >= 0) ? 2'sd1 : -2'sd1;
-                    end else begin
-                        pi_correction_next = 2'sd0;
+                        // start -> capture inputs into input pipeline
+                        state_next = LOAD_INPUT;
                     end
-                    z_next        = 0;
-                    iter_cnt_next = 0;
-                    state_next    = ITERATE;
-                end
             end
+
+                LOAD_INPUT: begin
+                    // wait until input pipeline valid shifts through
+                    if (in_valid_sr[INPUT_PIPELINE-1]) begin
+                        x_next = in_pipe_x[INPUT_PIPELINE-1];
+                        y_next = in_pipe_y[INPUT_PIPELINE-1];
+                        // If x is negative, rotate vector by 180 deg to bring into right half-plane
+                        if (x_next < 0) begin
+                            x_next = -x_next;
+                            y_next = -y_next;
+                            pi_correction_next = (y_next >= 0) ? 2'sd1 : -2'sd1;
+                        end else begin
+                            pi_correction_next = 2'sd0;
+                        end
+                        z_next        = 0;
+                        iter_cnt_next = 0;
+                        state_next    = ITERATE;
+                    end else begin
+                        state_next = LOAD_INPUT;
+                    end
+                end
 
             ITERATE: begin
                 if (iter_cnt < ITERATIONS) begin
