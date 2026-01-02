@@ -1,12 +1,19 @@
+// CORDIC Magnitude and Phase Calculator
+// Author: William Anthony
+// Date: 2 January 2025
+// Affiliation: Third Year Electrical Engineering Student at Bandung Institute of Technology
+//
 // Iterative CORDIC in vectoring mode with correct quadrant handling
 // Fixed-point angle: radians scaled by 2^28 (Q3.28-like)
+// Magnitude output: scaled by 2^OUTPUT_FRAC_BITS (default Q18.14)
 // One iteration per cycle, FSM based, synthesizable
 
 module cordic_magphase #(
-    parameter integer INPUT_WIDTH    = 16,
-    parameter integer INT_WIDTH      = 32,
-    parameter integer ITERATIONS     = 32,
-    parameter integer GAIN_FRAC_BITS = 28
+    parameter integer INPUT_WIDTH      = 16,
+    parameter integer INT_WIDTH        = 32,
+    parameter integer ITERATIONS       = 32,
+    parameter integer GAIN_FRAC_BITS   = 28,
+    parameter integer OUTPUT_FRAC_BITS = 14
 ) (
     input  wire                          clk,
     input  wire                          rst_n,
@@ -110,7 +117,8 @@ module cordic_magphase #(
             busy     <= (state_next != IDLE) && (state_next != DONE_STATE);
             done     <= (state_next == DONE_STATE);
             if (state_next == DONE_STATE) begin
-                magnitude <= (mag_corr < 0) ? -mag_corr : mag_corr;
+                // Scale magnitude to OUTPUT_FRAC_BITS (shift left to add fractional bits)
+                magnitude <= ((mag_corr < 0) ? -mag_corr : mag_corr) << OUTPUT_FRAC_BITS;
                 case (pi_correction)
                     -2'sd1: phase_tmp = z_next - PI_CONST;
                     2'sd0:  phase_tmp = z_next;

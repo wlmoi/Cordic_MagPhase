@@ -20,7 +20,8 @@ module tb_cordic_magphase;
     cordic_magphase #(
         .INPUT_WIDTH(INPUT_WIDTH),
         .INT_WIDTH(INT_WIDTH),
-        .ITERATIONS(ITERATIONS)
+        .ITERATIONS(ITERATIONS),
+        .OUTPUT_FRAC_BITS(OUTPUT_FRAC_BITS)
     ) dut (
         .clk(clk),
         .rst_n(rst_n),
@@ -40,12 +41,13 @@ module tb_cordic_magphase;
     // Utility to display results in degrees (phase uses radians scaled by 2^28)
     real phase_deg;
     real magnitude_real;
+    localparam OUTPUT_FRAC_BITS = 14; // Must match DUT parameter
 
     task show_result;
         begin
             phase_deg = (phase * 1.0) * 180.0 / 3.141592653589793 / (2.0**28);
-            magnitude_real = magnitude;
-            $display("Time %0t ns | x=%0d y=%0d | magnitude=%0d | phase_deg=%0f", $time, x_in, y_in, magnitude, phase_deg);
+            magnitude_real = magnitude / (2.0**OUTPUT_FRAC_BITS);
+            $display("Time %0t ns | x=%0d y=%0d | magnitude=%0f | phase_deg=%0f", $time, x_in, y_in, magnitude_real, phase_deg);
         end
     endtask
 
